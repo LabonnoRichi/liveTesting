@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <link rel="stylesheet" href="styles.css">
+
+  <title>Maze Host</title>
+</head>
+<body>
+
+  <div class="content" id="lobby">
+    <h1 class="heading">Waiting for players...</h1>
+    <img src="/qrcode.jpeg" alt="">
+    <h2 id="playerCount" class="heading">Players connected: 0</h2>
+    <div class="outset" id="outset">
+    </div>
+    <div id="startButton" class="button2 disabled"><a href="javascript:void(0);">START</a></div>
+  </div>
+
+    <canvas id="mazeCanvas" width="442" height="442"></canvas>
+          
+    <div id="leaderboard">
+      <div class="heading">Leaderboard</div>
+      <ol id="leaderboardList"></ol>
+    </div>
+
+  <script>
+    const lobby = document.getElementById('lobby');
+    const playerCountElem = document.getElementById('playerCount');
+    const startButton = document.getElementById('startButton');
+    const canvas = document.getElementById('mazeCanvas');
+    const ctx = canvas.getContext('2d');
+    const cellSize = 26;
+    const rows = canvas.width / cellSize;
+    const cols = canvas.height / cellSize;
+    const ballSize = cellSize / 4; // Radius of the ball
+    const maxSpeed = 0.035;
+    const leaderboardList = document.getElementById('leaderboardList');
+    const leaderboardDiv = document.getElementById('leaderboard');
+
+    let player_list_div = document.getElementById("outset");
+
+    let balls = [];
+    let maze = createMaze(rows, cols);
+    let gyroData = {};
+    let leaderboard = [];
+    let numFinished = 0;
+
+    const socket = new WebSocket('wss://gyroballteam3.onrender.com');
+    // const socket = new WebSocket('ws://localhost:8080');
+    
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'clientCount') {
+        let player_list_html = '';
+        for (let i=1; i<data.count+1; i++) {
+          player_list_html += `<p class="player">Player ${i}</p>`;
+        }
+        player_list_div.innerHTML = player_list_html; 
+        playerCountElem.textContent = `Players connected: ${data.count}`;
+        if (data.count < 2 || data.count > 4)
+          startButton.classList.add('disabled');
+        else
+          startButton.classList.remove('disabled');
+
+      } else if (data.type === 'start') {
+        initializeBalls(data.players);
+        startGame();
+      } else if (data.type === 'stop') {
+        stopGame();
+      } else if (data.type === 'updateLeaderboard') {
+        updateLeaderboard(data.leaderboard);
+      } else {
+        gyroData[data.id] = { beta: data.beta, gamma: data.gamma };
+      }
+    };
+
+    socket.onopen = () => {
+      console.log('Connected to server');
+    };
+
+    socket.onclose = () => {
+      console.log('Disconnected from server');
+      stopGame();
+    };
+
+    startButton.onclick = () => {
+      socket.send(JSON.stringify({ type: 'startGame' }));
+      startGame();
+    };
+
+    function startGame() {
+      lobby.style.display = 'none';
+      canvas.style.display = 'block';
+      leaderboardDiv.style.display = 'block';
+      document.body.style.backgroundColor = '#0c1a31';
+      drawMaze(maze);
+      gameLoop();
+    }
+
+    function stopGame() {
+      lobby.style.display = 'flex';
+      canvas.style.display = 'none';
+      leaderboardDiv.style.display = 'none';
+      playerCountElem.textContent = 'Players connected: 0';
+    }
+
+    function gameOver() {
+      canvas.style.display = 'none';
+      leaderboardDiv.style.fontSize = '40px';
+      leaderboardList.style.fontSize = '24px';
+      startConfetti();
+    }
+
+    function initializeBalls(players) {
+      balls = players.map(player => ({
+        x: player.position.x,
+        y: player.position.y,
+        playerID: player.id,
+        velX: 0,
+        velY: 0,
+        color: player.color,
+        finished: false
+      }));
+    }
+
+    function createMaze(rows, cols) {
+      // create maze grid and potential edges
+      let maze = [];
+      let edges = [];
+
+      for (let i = 0; i < rows; i++) {
+        let row = [];
+        for (let j = 0; j < cols; j++) {
+          row.push({ parent: null, north: true, south: true, east: true, west: true });
+          // add all possible edges
+          if (i > 0) edges.push({ u: { x: i, y: j }, v: { x: i - 1, y: j } }); // north
+          if (j > 0) edges.push({ u: { x: i, y: j }, v: { x: i, y: j - 1 } }); // west
+        }
+        maze.push(row);
+      }
+
+      // Shuffle edges randomly
+      edges = shuffle(edges);
+
+      // Disjoint-set (Union-Find) data structure
+      function find(node) {
+        if (node.parent === null) return node;
+        return find(node.parent);
+      }
+
+      function union(u, v) {
+        let rootU = find(u);
+        let rootV = find(v);
+        if (rootU !== rootV) {
+          rootU.parent = rootV;
+          return true;
+        }
+        return false;
+      }
+
+      // Kruskal's algo
+      for (let edge of edges) {
+        let u = maze[edge.u.x][edge.u.y];
+        let v = maze[edge.v.x][edge.v.y];
+        if (union(u, v)) {
+          // Remove wall between u and v
+          if (edge.u.x > edge.v.x) {
+            u.north = false;
+            v.south = false;
+          } else if (edge.u.x < edge.v.x) {
+            v.north = false;
+            u.south = false;
+          } else if (edge.u.y > edge.v.y) {
+            u.west = false;
+            v.east = false;
+          } else if (edge.u.y < edge.v.y) {
+            v.west = false;
+            u.east = false;
+          }
+        }
+      }
+
+      return maze;
+    }
+
+    function shuffle(array) {
+      for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+      }
+      return array;
+    }
+
+    function drawMaze(maze) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Highlight the central tile
+      const centerX = Math.floor(rows / 2) * cellSize;
+      const centerY = Math.floor(cols / 2) * cellSize;
+      ctx.fillStyle = 'magenta';
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 3;
+      ctx.fillRect(centerX, centerY, cellSize, cellSize);
+
+      for (let ball of balls) {
+        if (!ball.finished) {
+          ctx.fillStyle = ball.color;
+          ctx.beginPath();
+          ctx.arc(ball.x * cellSize, ball.y * cellSize, ballSize, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      for (let x = 0; x < rows; x++) {
+        for (let y = 0; y < cols; y++) {
+          let cell = maze[x][y];
+          let startX = y * cellSize;
+          let startY = x * cellSize;
+
+          ctx.beginPath();
+          if (cell.north) ctx.moveTo(startX, startY), ctx.lineTo(startX + cellSize, startY);
+          if (cell.south) ctx.moveTo(startX, startY + cellSize), ctx.lineTo(startX + cellSize, startY + cellSize);
+          if (cell.east) ctx.moveTo(startX + cellSize, startY), ctx.lineTo(startX + cellSize, startY + cellSize);
+          if (cell.west) ctx.moveTo(startX, startY), ctx.lineTo(startX, startY + cellSize);
+          ctx.stroke();
+        }
+      }
+
+    }
+
+    function updateBallPosition() {
+      for (let ball of balls) {
+        if (!ball.finished && gyroData[ball.playerID]) {
+          const gyro = gyroData[ball.playerID];
+
+          ball.velY += 0.035* gyro.beta / 180 * maxSpeed;
+          ball.velX += 0.035 * gyro.gamma / 90 * maxSpeed;
+
+          ball.velX = Math.max(Math.min(ball.velX, maxSpeed), -maxSpeed)
+          ball.velY = Math.max(Math.min(ball.velY, maxSpeed), -maxSpeed)
+
+          let newBallX = ball.x + ball.velX;
+          let newBallY = ball.y + ball.velY;
+
+          let x = ball.velX > 0 ? ballSize / cellSize : -ballSize / cellSize;
+          let y = ball.velY > 0 ? ballSize / cellSize : -ballSize / cellSize;
+
+          let currentCellX = Math.floor(ball.x);
+          let currentCellY = Math.floor(ball.y);
+          let nextCellX = Math.floor(newBallX + x);
+          let nextCellY = Math.floor(newBallY + y);
+
+          if (currentCellX !== nextCellX) {
+            if (ball.velX > 0 && maze[currentCellY][currentCellX].east) {
+              newBallX = currentCellX + 1 - ballSize / cellSize;
+              ball.velX = -ball.velX/2.5;
+            } else if (ball.velX < 0 && maze[currentCellY][currentCellX].west) {
+              newBallX = currentCellX + ballSize / cellSize;
+              ball.velX = -ball.velX/2.5;
+            } else if (newBallY % 1 > 0.8 || newBallY % 1 < 0.2) {
+              newBallX = ball.x;
+              ball.velX = -ball.velX/2.5;
+            }
+          }
+
+          if (currentCellY !== nextCellY) {
+            if (ball.velY > 0 && maze[currentCellY][currentCellX].south) {
+              newBallY = currentCellY + 1 - ballSize / cellSize;
+              ball.velY = -ball.velY/2.5;
+            } else if (ball.velY < 0 && maze[currentCellY][currentCellX].north) {
+              newBallY = currentCellY + ballSize / cellSize;
+              ball.velY = -ball.velY/2.5;
+            } else if (newBallX % 1 > 0.8 || newBallX % 1 < 0.2) {
+              newBallY = ball.y;
+              ball.velY = -ball.velY/2.5;
+            }
+          }
+
+          ball.x = newBallX;
+          ball.y = newBallY;
+
+          if (Math.floor(ball.x) === Math.floor(cols / 2) && Math.floor(ball.y) === Math.floor(rows / 2)) {
+          // if (Math.floor(ball.x) === 0 && Math.floor(ball.y) === 0) {
+            ball.finished = true;
+            leaderboard.push(ball.playerID);
+            updateLeaderboard(leaderboard, ball);
+          }
+        }
+      }
+
+      drawMaze(maze);
+    }
+
+    function updateLeaderboard(leaderboard, ball) {
+        numFinished += 1;
+        const listItem = document.createElement('li');
+        listItem.style.color = 'white';
+        listItem.textContent = `Player ${ball.color}`;
+        leaderboardList.appendChild(listItem);
+        if (numFinished === balls.length-1) {
+          for (let ball of balls) {
+            if (!ball.finished) {
+              ball.finished = true;
+              const listItem = document.createElement('li');
+              listItem.style.color = 'white';
+              listItem.textContent = `Player ${ball.color}`;
+              leaderboardList.appendChild(listItem);
+            }
+          }
+          gameOver();
+        }
+    }
+
+    function gameLoop() {
+      updateBallPosition();
+      requestAnimationFrame(gameLoop);
+    }
+    function createConfetti() {
+    const confetti = document.createElement('div');
+    confetti.className = 'confetti';
+    confetti.style.backgroundColor = `hsl(${Math.random() * 360}, 100%, 50%)`;
+    confetti.style.left = `${Math.random() * 100}vw`;
+    confetti.style.top = `-${Math.random() * 20}px`; // Start slightly above the viewport
+    confetti.style.animation = `fall ${Math.random() * 3 + 2}s linear`;
+    confetti.style.transform = `rotate(${Math.random() * 360}deg)`;
+    document.body.appendChild(confetti);
+
+    setTimeout(() => {
+        confetti.remove();
+    }, 5000); // Confetti duration on screen
+}
+
+function startConfetti() {
+    let duration = 0;
+    const intervals = [
+        { time: 0, delay: 50 },
+        { time: 1000, delay: 100 },
+        { time: 3000, delay: 200 }
+    ];
+
+    intervals.forEach(interval => {
+        setTimeout(() => {
+            const intervalId = setInterval(() => {
+                createConfetti();
+                duration += interval.delay;
+                if (duration >= 5000) {
+                    clearInterval(intervalId);
+                }
+            }, interval.delay);
+        }, interval.time);
+    });
+
+    setTimeout(() => {
+        document.querySelectorAll('.confetti').forEach(conf => conf.remove());
+    }, 5000); // Stop creating confetti after 5 seconds
+}
+  </script>
+</body>
+</html>
